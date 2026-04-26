@@ -387,7 +387,3 @@ It does not delete project files.
 ## License
 
 MIT License
-
-````
-
----
