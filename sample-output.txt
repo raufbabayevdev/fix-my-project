@@ -1,0 +1,21 @@
+🩺 fix-my-project
+Version: 0.1.0
+Project: /home/user/demo-project
+
+⚠️ Project score: 72/100
+
+1. ⚠️ .gitignore is missing
+   File: .gitignore
+   Problem: No .gitignore file was found.
+   Fix: Create a .gitignore file to avoid committing secrets, dependencies, and build output.
+
+2. ❌ Environment file may be committed
+   File: .env
+   Problem: .env exists but does not appear to be ignored by .gitignore.
+   Fix: Add '.env' and '.env.*' to .gitignore. Keep only .env.example in Git.
+
+3. ⚠️ Multiple package manager lockfiles detected
+   Problem: Found: package-lock.json, pnpm-lock.yaml
+   Fix: Use only one package manager per project to avoid dependency mismatch.
+
+Done.
