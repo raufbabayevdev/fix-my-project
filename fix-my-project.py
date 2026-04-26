@@ -4,7 +4,7 @@ fix-my-project.py
 
 A tiny cross-platform project doctor.
 Scans a project folder for common Git, Node.js, Python, Docker, CI,
-and secret-management mistakes.
+source-file, metadata, and secret-management mistakes.
 
 Works with:
 - Windows
@@ -26,10 +26,10 @@ import subprocess
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 # -----------------------------
@@ -55,10 +55,6 @@ class Report:
 # -----------------------------
 # Helpers
 # -----------------------------
-
-def is_windows() -> bool:
-    return os.name == "nt"
-
 
 def safe_read_text(path: Path) -> str:
     try:
@@ -123,7 +119,11 @@ def append_to_gitignore(root: Path, patterns: List[str]) -> bool:
     if not to_add:
         return True
 
-    new_content = existing.rstrip() + "\n\n# Added by fix-my-project\n" + "\n".join(to_add) + "\n"
+    if existing.strip():
+        new_content = existing.rstrip() + "\n\n# Added by fix-my-project\n" + "\n".join(to_add) + "\n"
+    else:
+        new_content = "# Added by fix-my-project\n" + "\n".join(to_add) + "\n"
+
     return safe_write_text(gitignore, new_content)
 
 
@@ -141,7 +141,7 @@ def is_ignored_by_gitignore(root: Path, target: str) -> bool:
             continue
         patterns.add(line)
 
-    normalized = target.replace("\\", "/")
+    normalized = target.replace("\\", "/").strip("/")
 
     possible_patterns = {
         normalized,
@@ -151,7 +151,22 @@ def is_ignored_by_gitignore(root: Path, target: str) -> bool:
     }
 
     if normalized.startswith(".env"):
-        possible_patterns.update({".env", ".env.*", "*.env"})
+        possible_patterns.update({
+            ".env",
+            ".env.*",
+            "*.env",
+            ".env.local",
+            ".env.development",
+            ".env.production",
+            ".env.test",
+        })
+
+    if normalized in {"node_modules", ".venv", "venv", "__pycache__"}:
+        possible_patterns.update({
+            normalized,
+            f"{normalized}/",
+            f"/{normalized}/",
+        })
 
     return bool(patterns.intersection(possible_patterns))
 
@@ -167,13 +182,18 @@ def find_files(
             "node_modules",
             ".venv",
             "venv",
+            "env",
             "__pycache__",
             ".next",
+            ".nuxt",
             "dist",
             "build",
             ".cache",
             ".idea",
             ".vscode",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
         }
 
     result: List[Path] = []
@@ -191,6 +211,10 @@ def find_files(
     return result
 
 
+def has_any_file(root: Path, names: List[str]) -> bool:
+    return any(exists(root, name) for name in names)
+
+
 # -----------------------------
 # Checks
 # -----------------------------
@@ -204,6 +228,48 @@ def check_git_repo(root: Path) -> List[Finding]:
             title="Git repository not found",
             message="This folder does not look like a Git repository.",
             recommendation="Run 'git init' if this project should be tracked with Git.",
+        ))
+
+    return findings
+
+
+def check_project_metadata(root: Path) -> List[Finding]:
+    findings: List[Finding] = []
+
+    readme_files = [
+        "README.md",
+        "README.txt",
+        "README",
+        "readme.md",
+        "Readme.md",
+    ]
+
+    license_files = [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "LICENCE",
+        "LICENCE.md",
+        "COPYING",
+    ]
+
+    has_readme = has_any_file(root, readme_files)
+    has_license = has_any_file(root, license_files)
+
+    if not has_readme:
+        findings.append(Finding(
+            level="warning",
+            title="README is missing",
+            message="No README file was found.",
+            recommendation="Add a README.md with project description, installation steps, usage examples, and requirements.",
+        ))
+
+    if not has_license:
+        findings.append(Finding(
+            level="info",
+            title="LICENSE is missing",
+            message="No license file was found.",
+            recommendation="Add a license such as MIT if this is an open-source project.",
         ))
 
     return findings
@@ -227,6 +293,7 @@ def check_gitignore(root: Path, fix: bool) -> List[Finding]:
         "*.pyc",
         ".venv/",
         "venv/",
+        "env/",
     ]
 
     if not gitignore.exists():
@@ -261,14 +328,17 @@ def check_gitignore(root: Path, fix: bool) -> List[Finding]:
         if pattern not in content:
             missing.append(pattern)
 
-    important_missing = [p for p in missing if p in [".env", ".env.*", "node_modules/", ".venv/", "venv/"]]
+    important_missing = [
+        p for p in missing
+        if p in [".env", ".env.*", "node_modules/", ".venv/", "venv/", "env/", "__pycache__/", "*.pyc"]
+    ]
 
     if important_missing:
         findings.append(Finding(
             level="warning",
             title=".gitignore is missing important patterns",
             message=f"Missing patterns: {', '.join(important_missing)}",
-            recommendation="Add these patterns to avoid committing secrets or unnecessary folders.",
+            recommendation="Add these patterns to avoid committing secrets, dependency folders, virtual environments, and cache files.",
             file=".gitignore",
         ))
 
@@ -294,8 +364,15 @@ def check_env_files(root: Path) -> List[Finding]:
         if p.is_file() and (p.name == ".env" or p.name.startswith(".env."))
     ]
 
+    safe_env_examples = {
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.example.local",
+    }
+
     for env_file in env_files:
-        if env_file.name in [".env.example", ".env.sample", ".env.template"]:
+        if env_file.name in safe_env_examples:
             continue
 
         if not is_ignored_by_gitignore(root, env_file.name):
@@ -335,7 +412,7 @@ def check_node_project(root: Path) -> List[Finding]:
             level="warning",
             title="No lockfile found",
             message="package.json exists but no lockfile was found.",
-            recommendation="Run your package manager install command to create a lockfile, for example: npm install, pnpm install, or yarn install.",
+            recommendation="Run your package manager install command to create a lockfile, for example: npm install, pnpm install, yarn install, or bun install.",
             file="package.json",
         ))
 
@@ -369,7 +446,7 @@ def check_node_project(root: Path) -> List[Finding]:
                 level="info",
                 title="No common npm scripts found",
                 message="package.json does not include dev/start/build/test scripts.",
-                recommendation="Add useful scripts so contributors know how to run the project.",
+                recommendation="Add useful scripts so contributors know how to run, build, or test the project.",
                 file="package.json",
             ))
 
@@ -393,7 +470,7 @@ def check_node_project(root: Path) -> List[Finding]:
 def check_python_project(root: Path) -> List[Finding]:
     findings: List[Finding] = []
 
-    has_python = any([
+    has_python_config = any([
         exists(root, "requirements.txt"),
         exists(root, "pyproject.toml"),
         exists(root, "setup.py"),
@@ -401,7 +478,7 @@ def check_python_project(root: Path) -> List[Finding]:
         exists(root, "poetry.lock"),
     ])
 
-    if not has_python:
+    if not has_python_config:
         return findings
 
     if exists(root, "requirements.txt") and exists(root, "pyproject.toml"):
@@ -412,7 +489,7 @@ def check_python_project(root: Path) -> List[Finding]:
             recommendation="This can be okay, but make sure they do not define conflicting dependency sources.",
         ))
 
-    for venv_name in [".venv", "venv"]:
+    for venv_name in [".venv", "venv", "env"]:
         venv_path = root / venv_name
         if venv_path.exists() and not is_ignored_by_gitignore(root, venv_name):
             findings.append(Finding(
@@ -431,6 +508,67 @@ def check_python_project(root: Path) -> List[Finding]:
             message="__pycache__ folders exist but do not appear to be ignored.",
             recommendation="Add '__pycache__/' and '*.pyc' to .gitignore.",
         ))
+
+    return findings
+
+
+def check_source_files(root: Path) -> List[Finding]:
+    findings: List[Finding] = []
+
+    files = find_files(root, max_files=5000)
+
+    python_files = [p for p in files if p.suffix.lower() == ".py"]
+
+    js_files = [
+        p for p in files
+        if p.suffix.lower() in [".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"]
+    ]
+
+    shell_files = [
+        p for p in files
+        if p.suffix.lower() in [".sh", ".bash", ".zsh"]
+    ]
+
+    if python_files:
+        has_python_config = any([
+            exists(root, "requirements.txt"),
+            exists(root, "pyproject.toml"),
+            exists(root, "setup.py"),
+            exists(root, "Pipfile"),
+            exists(root, "poetry.lock"),
+        ])
+
+        if not has_python_config:
+            findings.append(Finding(
+                level="info",
+                title="Python files found without dependency file",
+                message=f"Found {len(python_files)} Python file(s), but no requirements.txt, pyproject.toml, setup.py, Pipfile, or poetry.lock.",
+                recommendation="This is only a problem if the project uses external Python packages. If it only uses the standard library, you can ignore this.",
+            ))
+
+    if js_files:
+        if not exists(root, "package.json"):
+            findings.append(Finding(
+                level="info",
+                title="JavaScript/TypeScript files found without package.json",
+                message=f"Found {len(js_files)} JavaScript/TypeScript file(s), but no package.json.",
+                recommendation="This is only a problem if the project uses Node.js dependencies, npm scripts, or a build tool.",
+            ))
+
+    if shell_files:
+        for script in shell_files[:10]:
+            content = safe_read_text(script)
+            lines = content.splitlines()
+            first_line = lines[0] if lines else ""
+
+            if not first_line.startswith("#!"):
+                findings.append(Finding(
+                    level="info",
+                    title="Shell script may be missing shebang",
+                    message=f"{rel(root, script)} does not start with a shebang line.",
+                    recommendation="Add a shebang such as '#!/usr/bin/env bash' if this file is meant to be executable.",
+                    file=rel(root, script),
+                ))
 
     return findings
 
@@ -454,7 +592,7 @@ def check_docker(root: Path) -> List[Finding]:
     if dockerfile.exists():
         content = safe_read_text(dockerfile)
 
-        if "COPY . ." in content and ".dockerignore" not in [p.name for p in root.iterdir()]:
+        if "COPY . ." in content and not exists(root, ".dockerignore"):
             findings.append(Finding(
                 level="warning",
                 title="Docker build context may be too large",
@@ -478,7 +616,7 @@ def check_docker(root: Path) -> List[Finding]:
             p = root / name
             if p.exists():
                 content = safe_read_text(p)
-                if "latest" in content:
+                if re.search(r":latest\b", content):
                     findings.append(Finding(
                         level="info",
                         title="Docker image uses latest tag",
@@ -536,7 +674,7 @@ def check_github_actions(root: Path) -> List[Finding]:
 def check_large_files(root: Path) -> List[Finding]:
     findings: List[Finding] = []
 
-    files = find_files(root, max_files=3000)
+    files = find_files(root, max_files=5000)
     large_files = []
 
     for p in files:
@@ -557,7 +695,7 @@ def check_large_files(root: Path) -> List[Finding]:
             level="warning",
             title="Large files detected",
             message=f"Large files found: {message}",
-            recommendation="Avoid committing large binaries. Use Git LFS or external storage if needed.",
+            recommendation="Avoid committing large binaries. Use Git LFS, release assets, or external storage if needed.",
         ))
 
     return findings
@@ -569,6 +707,7 @@ def check_secrets(root: Path) -> List[Finding]:
     secret_patterns: Dict[str, re.Pattern] = {
         "Possible AWS Access Key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
         "Possible GitHub token": re.compile(r"\bghp_[A-Za-z0-9_]{30,}\b"),
+        "Possible GitHub fine-grained token": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
         "Possible private key": re.compile(r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
         "Possible generic API key": re.compile(
             r"(?i)\b(api_key|apikey|secret|token|password)\b\s*[:=]\s*['\"][^'\"]{12,}['\"]"
@@ -582,13 +721,13 @@ def check_secrets(root: Path) -> List[Finding]:
         ".sh", ".bash", ".zsh",
     }
 
-    files = find_files(root, max_files=3000)
+    files = find_files(root, max_files=5000)
 
     for p in files:
         if p.suffix.lower() not in allowed_extensions and p.name != ".env":
             continue
 
-        # Skip lockfiles because false positives are very common.
+        # Skip lockfiles because false positives are common.
         if p.name in ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock"]:
             continue
 
@@ -627,6 +766,7 @@ def check_git_tracked_bad_files(root: Path) -> List[Finding]:
         ".env",
         ".venv/",
         "venv/",
+        "env/",
         "__pycache__/",
         ".DS_Store",
         "Thumbs.db",
@@ -728,9 +868,11 @@ def scan_project(root: Path, fix: bool = False) -> Report:
     checks = [
         check_git_repo,
         lambda r: check_gitignore(r, fix=fix),
+        check_project_metadata,
         check_env_files,
         check_node_project,
         check_python_project,
+        check_source_files,
         check_docker,
         check_github_actions,
         check_large_files,
@@ -761,7 +903,7 @@ def scan_project(root: Path, fix: bool = False) -> Report:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="fix-my-project",
-        description="Scan a project for common setup, Git, dependency, Docker, CI, and secret mistakes.",
+        description="Scan a project for common setup, Git, dependency, Docker, CI, source-file, metadata, and secret mistakes.",
     )
 
     parser.add_argument(
@@ -825,3 +967,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    
